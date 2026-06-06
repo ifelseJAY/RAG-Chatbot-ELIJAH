@@ -1,0 +1,109 @@
+# RAG_Chatbot.py (UI wiring for Q&A)
+import streamlit as st
+import pdfplumber
+import docx
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+import faiss
+import numpy as np
+
+OPENAI_API_KEY = "DVO8x5KMddM insert your key here"
+# --- Extraction functions (Step 2) ---
+def extract_text_from_pdf(file):
+    text = ""
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+    return text.strip()
+
+def extract_text_from_docx(file):
+    doc = docx.Document(file)
+    return "\n".join([para.text for para in doc.paragraphs]).strip()
+
+def extract_text_from_txt(file):
+    return file.read().decode("utf-8").strip()
+
+def normalize_text(text):
+    return " ".join(text.split())
+
+# --- Chunking (Step 3) ---
+def chunk_cv_text(text):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=100,
+        length_function=len,
+    )
+    return splitter.split_text(text)
+
+# --- Embeddings (Step 4) ---
+def create_embeddings(chunks):
+    embeddings_model = OpenAIEmbeddings()
+    vectors = embeddings_model.embed_documents(chunks)
+    return vectors, embeddings_model
+
+# --- Vector Store (Step 5) ---
+def build_vector_store(vectors):
+    vectors_np = np.array(vectors).astype("float32")
+    dimension = vectors_np.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(vectors_np)
+    return index
+
+# --- Query Handling (Step 6) ---
+def search_similar_chunks(query, index, chunks, embeddings_model, top_k=3):
+    query_vector = embeddings_model.embed_query(query)
+    query_vector_np = np.array([query_vector]).astype("float32")
+    distances, indices = index.search(query_vector_np, top_k)
+    return [chunks[i] for i in indices[0]]
+
+def generate_answer(query, index, chunks, embeddings_model, llm):
+    relevant_chunks = search_similar_chunks(query, index, chunks, embeddings_model)
+    context = "\n".join(relevant_chunks)
+    prompt = f"Answer the following question using the context:\n\n{context}\n\nQuestion: {query}"
+    return llm.predict(prompt)
+
+# --- Streamlit UI ---
+st.title("ELIJAH - RAG Chatbot")
+
+uploaded_files = st.sidebar.file_uploader(
+    "Upload CVs or documents (PDF, DOCX, TXT)",
+    type=["pdf", "docx", "txt"],
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    st.success("Files uploaded successfully!")
+
+    # Process files into chunks
+    all_chunks = []
+    for file in uploaded_files:
+        if file.type == "application/pdf":
+            text = extract_text_from_pdf(file)
+        elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            text = extract_text_from_docx(file)
+        elif file.type == "text/plain":
+            text = extract_text_from_txt(file)
+        else:
+            text = ""
+        if text:
+            text = normalize_text(text)
+            chunks = chunk_cv_text(text)
+            all_chunks.extend(chunks)
+
+    # Build embeddings + vector store
+    vectors, embeddings_model = create_embeddings(all_chunks)
+    index = build_vector_store(vectors)
+
+    # --- Chat interface ---
+    st.write("### Chat with ELIJAH")
+    user_query = st.text_input("Type your question here:")
+
+    if user_query:
+        llm = ChatOpenAI(model="gpt-4o-mini")  # lightweight model
+        answer = generate_answer(user_query, index, all_chunks, embeddings_model, llm)
+        st.markdown("**ELIJAH’s Answer:**")
+        st.write(answer)
+else:
+    st.info("Please upload one or more files to begin.")
